@@ -1,155 +1,92 @@
 # AGENTS.md
 
-ECE22073 academic project: multilingual podcast summarizer with ASR, NER, speaker diarization, and multi-tier summarization.
+ECE22073 multilingual podcast summarizer — ASR, NER, speaker diarization, multi-tier summarization, podcast TTS generation.
 
-## Commands
+**⚠️ Continue from here first.** Ignore old `Politakis/` references — the repo was restructured 2026-06-11.
+
+## Quick Start
 
 ```bash
-# Install dependencies (one-time)
-pip install -r Politakis/requirements.txt
+# Streamlit UI (Docker — recommended)
+cd App && docker compose up
+# → http://localhost:8501
 
-# Generate multilingual test audio + ground truth (one-time)
-python3 setup_bilingual_test.py
+# Streamlit UI (native Python)
+cd App && streamlit run streamlit_app.py
 
-# Full pipeline on an audio file
-python3 Politakis/run_pipeline.py <path_to_audio.wav>
+# Colab notebook
+# Open Pipeline/notebook.ipynb in Google Colab — run cells 1-4 in order
 
-# Evaluation against rubric gates (WER ≤ 0.08, ROUGE-1 ≥ 0.40, Topic Recall ≥ 0.80)
-python3 Politakis/evaluate_real_pipeline.py
+# Local pipeline
+python3 -c "import sys; sys.path.insert(0, 'Pipeline'); from run_pipeline import run_pipeline; run_pipeline('Samples/sample_podcasts/bilingual_long.wav')"
 
-# Streamlit dashboard (MUST run from inside Politakis/ — uses relative Path("results"))
-cd Politakis && streamlit run streamlit_app.py
+# Evaluation
+python3 -c "import sys; sys.path.insert(0, 'Benchmarks'); sys.path.insert(0, 'Pipeline'); from evaluate_real_pipeline import run_real_evaluation; run_real_evaluation()"
 
-# Benchmark all ASR models
-python3 Politakis/benchmark_all.py <audio.wav> <ground_truth.json> [--normalize]
+# Benchmark all ASR models (on Colab GPU)
+python3 Benchmarks/benchmark_all.py Samples/sample_podcasts/bilingual_long.wav Samples/sample_podcasts/bilingual_long_gt.json --normalize
 ```
-
-Pipeline and evaluation scripts inject `Politakis/` into `sys.path` automatically and can run from repo root. The Streamlit app uses `Path("results")` (relative), so it must be launched from within `Politakis/`.
-
-No CI, no tests, no linter config. This is an academic deliverable.
 
 ## Architecture
 
-Six sequential modules in `Politakis/`:
-
 ```
-audio_processor → asr_pipeline → llm_integration → transcript_normalizer
-                → topic_extraction → summary_generator
+asr-notebook/
+├── Pipeline/        → Core: config, drive_bridge, colab_job_watcher, run_pipeline,
+│                       audio_processor, asr_pipeline, llm_integration,
+│                       transcript_normalizer, topic_extraction, summary_generator,
+│                       podcast_pipeline, diarize_transcript, strip_newlines
+├── App/             → Streamlit UI, Dockerfile, docker-compose.yml, requirements
+├── Benchmarks/      → evaluate, evaluate_real_pipeline, benchmark_all + 5 others
+├── Foundational/    → real_time_processor, sanity_transcribe
+├── Samples/         → sample_podcasts/ (test audio + ground truth)
+└── Results/         → Output directory
 ```
 
-| Stage | Module | Responsibility |
-|-------|--------|----------------|
-| 1 | `audio_processor` | Load any audio format via pydub, normalize to −20 dBFS, resample to 16 kHz mono, split into chunks on silence boundaries using Silero VAD. Outputs generator of chunk dicts. |
-| 2 | `asr_pipeline` | Transcribes chunks with `faster-whisper` (CTranslate2 backend), runs pyannote speaker diarization, tags speakers, filters low-confidence segments. Outputs generator of chunk dicts. |
-| 3a | `llm_integration` | Sends transcript windows to an LLM (OpenAI-compatible API or local Ollama) every ~2 min for live-ticker NER and segment summarization. Async, non-blocking. |
-| 3b | `transcript_normalizer` | LLM-based entity/term repair: corrects proper nouns, org names, technical terms. Feature-flagged via `ENABLE_TRANSCRIPT_NORMALIZATION`. Never affects WER (WER uses raw `transcript.txt`). |
-| 3c | `topic_extraction` | Deduplicates and normalizes entity lists from the live ticker into a frequency-ranked registry. Supports both batch and streaming incremental modes. |
-| 4 | `summary_generator` | Produces YouTube-style timestamped chapters and three summary tiers (TL;DR, Executive, Deep Dive) from the full transcript and entity registry. Also provides Q&A backend. |
-| — | `real_time_processor.py` | Async wrapper emitting live events (`chunk`, `ticker`, `summary`, `done`) for streaming use cases. |
-| — | `evaluate.py` | Metric computation library (WER, ROUGE, topic recall, latency, language support). Used by notebooks and evaluation scripts. |
+**Data flow**: Streamlit (local) ↔ Google Drive ↔ Colab watcher (T4 GPU)
 
-Output directory: `Politakis/results/` — `transcript.json`, `transcript.txt`, `summary_outputs.json`, `quality_metrics.json`.
+**ASR pipeline**: `audio_processor → asr_pipeline → llm_integration → transcript_normalizer → topic_extraction → summary_generator`
 
-## Environment prerequisites
+## Key Commands
 
-- **PyAnnote diarization** requires a HuggingFace token. Export before running:
-  ```bash
-  export HF_TOKEN="hf_..."
-  ```
-- **LLM** defaults to `gpt-5.4-mini-2026-03-17` via the OpenAI API (`OPENAI_API_KEY`). For local Ollama:
-  ```bash
-  export OPENAI_API_KEY="sk-..."
-  export LLM_BASE_URL=http://localhost:11434/v1
-  export LLM_MODEL=llama3
-  ```
-- **Transcript normalization** uses `NORMALIZATION_MODEL` (default `gpt-5.4-mini-2026-03-17`). Set `ENABLE_TRANSCRIPT_NORMALIZATION=false` to skip.
-- **ffmpeg** is only needed for compressed formats (mp3, ogg, m4a). `.wav` files are parsed natively via Python's `wave` library.
+| Task | Command |
+|------|---------|
+| Install deps | `pip install -r App/requirements.txt` |
+| Docker build + run | `cd App && docker compose up` |
+| Pipeline (local) | `python3 -c "import sys; sys.path.insert(0,'Pipeline'); from run_pipeline import run_pipeline; run_pipeline('<path>')"` |
+| Evaluation | `python3 -c "import sys; sys.path.insert(0,'Benchmarks'); sys.path.insert(0,'Pipeline'); from evaluate_real_pipeline import run_real_evaluation; run_real_evaluation()"` |
+| Colab watcher | Open `Pipeline/notebook.ipynb` → run cells 1-4 |
 
-## Code style conventions
+## Environment
 
-### Imports
-
-- Every file begins with `from __future__ import annotations` as the first import.
-- Standard library imports first, then third-party, then local/relative. No blank line separators between groups within the same block.
-- Heavy ML dependencies (torch, openai, faster-whisper, pyannote) are imported at module level. Lightweight helpers (lazy clients, fallback loaders) use function-level imports with try/except.
-- Local module imports use bare names (`import audio_processor as ap`), relying on `sys.path.insert(0, ...)` in the orchestrating script.
-
-### Typing
-
-- **All public functions** must have type annotations on parameters and return type.
-- Use `from typing import Any, Generator, AsyncIterator, TypedDict` as needed.
-- Use Python 3.10+ union syntax: `str | Path`, `dict | None`, `list[dict]`.
-- **TypedDict** for every schema object that crosses module boundaries (entity registry, summary outputs, quality metrics, processing analysis). Document the full JSON schema in the docstring block above the TypedDict.
-- Module-level constants are type-annotated: `TARGET_SAMPLE_RATE: int = 16_000`.
-- Inline variable annotations for numpy/torch types: `samples_f32: np.ndarray = ...`.
-
-### Naming
-
-- `snake_case` for variables, functions, methods, and modules.
-- `PascalCase` for classes: `SileroVAD`, `AccumulatedTranscript`, `EntityRegistry`, `ResourceMonitor`.
-- `UPPER_CASE` for module-level constants and thresholds.
-- Private methods and module-level helpers are prefixed with `_` (e.g., `_call_llm`, `_normalise_entity`, `_rank_entities`).
-
-### Error handling
-
-- Defensive dict access with `.get(key, default)` throughout — never rely on dict keys being present.
-- LLM JSON responses are parsed with try/except `json.JSONDecodeError`; fall back to empty defaults rather than crashing.
-- Optional dependencies (diarization, GPU acceleration) fail gracefully with `logger.warning()` and return empty results.
-- Pipeline stages in `run_pipeline.py` use the `_run_stage()` wrapper that catches all exceptions and returns fallback payloads.
-
-### Functions and generators
-
-- Streaming stages (`audio_processor`, `asr_pipeline`) use **generator functions** (`yield` chunk dicts) to avoid buffering entire audio in RAM.
-- Async LLM calls (`llm_integration`, `summary_generator`) use `asyncio.create_task()` to fire background calls while the stream continues.
-- Every async function has a synchronous wrapper (e.g., `generate_summary()` wraps `generate_summary_async()` via `asyncio.run()`).
-- Keyword-only arguments use `*` separator for tuneable parameters (e.g., `*, vad_threshold=0.5, min_chunk_sec=25.0`).
-
-### JSON and serialization
-
-- All data crossing module boundaries is parsed JSON dict — never raw multi-line strings.
-- `json.dumps(payload, ensure_ascii=False)` for multilingual text (Greek + English).
-- `round(value, 4)` on all floats before embedding in dicts — ensures clean JSON and prevents NumPy subtypes.
-- NumPy numeric types (float32, int64) must be cast with `float()` or `int()` before JSON serialization.
-- File I/O uses `Path.read_text(encoding="utf-8")` / `Path.write_text()` and `json.dump(..., indent=2, ensure_ascii=False)`.
-
-### Comments and docstrings
-
-- Extensive **"why" comments** on every non-trivial block — explain the rationale, not what the code does.
-- Module docstrings describe responsibility and document the output schema.
-- Sections separated with `# ═══ Section Name ═══` dividers.
-- Section-numbering comments in longer modules (e.g., `# 1. LLM Client`, `# 4. Q&A`).
-
-### Logging
-
-- Every module creates its own logger: `logger = logging.getLogger(__name__)`.
-- Logging format: `"%(asctime)s | %(name)s | %(levelname)s | %(message)s"`.
-- Use `logger.info()` for key pipeline events, `logger.warning()` for non-fatal issues, `logger.error()` for failures.
-- Emoji prefixes in orchestration logs (`🎙️`, `🧠`, `🗂️`, `📝`) — not used in library modules.
-
-## Key files
-
-| File | Role |
-|------|------|
-| `Politakis/run_pipeline.py` | End-to-end orchestrator (main entrypoint) |
-| `Politakis/evaluate_real_pipeline.py` | Rubric-gate verification against ground truth |
-| `Politakis/evaluate.py` | Metric computation library (WER, ROUGE, recall, latency) |
-| `Politakis/streamlit_app.py` | Interactive web dashboard |
-| `Politakis/real_time_processor.py` | Async streaming wrapper with live event emission |
-| `Politakis/transcript_normalizer.py` | LLM-based ASR error correction (feature-flagged) |
-| `Politakis/requirements.txt` | All Python dependencies |
-| `Politakis/results/` | Output directory (transcripts, summaries, metrics) |
-| `Politakis/sample_podcasts/` | Test audio files and generators |
-| `setup_bilingual_test.py` | Generates bilingual test audio + ground truth JSON |
-| `Politakis/benchmark_all.py` | Multi-model ASR benchmark with normalization support |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `OPENAI_API_KEY` | — | Required for LLM stages |
+| `NORMALIZATION_MODEL` | `gpt-5.4-mini-2026-03-17` | Transcript cleanup model |
+| `ENABLE_TRANSCRIPT_NORMALIZATION` | `true` | Feature flag |
+| `HF_TOKEN` | — | Required for pyannote diarization |
+| `LLM_BASE_URL` | `https://api.openai.com/v1` | Override for Ollama |
+| `LLM_MODEL` | `gpt-5.4-mini-2026-03-17` | Model for NER/summary |
 
 ## Gotchas
 
-- **ROUGE-1 key**: evaluation uses `rouge1_f1`, not `rouge1`. `evaluate_real_pipeline.py:165` was patched for this.
-- **NumPy → JSON**: `audio_processor.py` casts RMS values with `float()` before JSON serialization. Any new numeric feature in chunk dicts must be cast to native Python types.
-- **PyAnnote API version**: `asr_pipeline.py` checks for `.speaker_diarization` attribute on the result; modern PyAnnote wraps `Annotation` inside `DiarizeOutput`.
-- **Ground truth files**: `evaluate_real_pipeline.py` looks for `sample_podcasts/<stem>_gt.json` matching the source audio filename, falling back to `results/ground_truth.json`. Generate proper ground truth with `setup_bilingual_test.py`.
-- **Silero VAD** is stateful — `vad_chunker()` calls `vad.reset()` at end-of-stream.
-- **Chunks < 0.3 s** are silently skipped by `vad_chunker()` as trailing silence.
-- **Transcript normalization**: uses `ENABLE_TRANSCRIPT_NORMALIZATION` env var (default `true`). Never affects WER — raw `transcript.txt` is the immutable reference. Entity re-extraction runs on normalized text and replaces ticker entities.
-- **Long-running pipelines**: run directly in your terminal, not via agent bash tools. Pipeline runs may produce no visible output for extended periods.
-- No CI, no tests, no linter config. This is an academic deliverable.
+- **Read this file first** before doing anything — old `Politakis/` paths no longer exist
+- **WER always uses raw `transcript.txt`** — normalization never touches it
+- **Drive FUSE is broken on Colab** — watcher must use `db.find_new_input_files()` (Drive API), never `os.listdir()`
+- **`logging.basicConfig(force=True)`** mandatory before importing watcher modules in Colab
+- **Do NOT call `cjw.main_loop()`** — use inline watcher in notebook Cell 4 (see CLAUDE.md for pattern)
+- **`App/credentials.json`** required for Drive OAuth → writes `App/token.json`
+- **Colab watcher accepts `.wav`, `.mp3`, `.m4a`** — audio_processor handles all via pydub
+- **Diarization disabled on Colab** (numpy/pyannote version mismatch)
+- **Word timestamps disabled on Colab** (CTranslate2 CUDA alignment crash on T4)
+- **No CI, no tests, no linter** — academic deliverable
+- **Terminal hangs**: run pipelines directly in your terminal, not via agent bash tool
+- **Two `ece22073` folders in Drive** — delete the newer one (created 12:00)
+
+## ASR Models Benchmarked
+
+| Model | Backend | Greek | Notes |
+|-------|---------|-------|-------|
+| faster-whisper turbo | CTranslate2 int8 | ✅ | Production baseline, 0.73× real-time on M2 |
+| faster-whisper large-v3 | CTranslate2 int8 | ✅ | Slower, similar WER |
+| Parakeet TDT 0.6B | Transformers CUDA | ✅ | Needs Colab T4 + git transformers |
+| Canary 1B V2 | NeMo CUDA | ✅ | Needs `source_lang=target_lang` for ASR mode |
